@@ -6,8 +6,16 @@
 
 using namespace std;
 
+// Return value package
+struct ReturnVals {
+  double steer;
+  double throttle;
+  vector<double> mpc_x_vals;
+  vector<double> mpc_y_vals;
+};
+
 class MPC {
- public:
+public:
   MPC();
 
   virtual ~MPC();

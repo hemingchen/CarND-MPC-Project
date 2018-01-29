@@ -14,7 +14,9 @@ using json = nlohmann::json;
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
+
 double deg2rad(double x) { return x * pi() / 180; }
+
 double rad2deg(double x) { return x * 180 / pi(); }
 
 // Checks if the SocketIO event has JSON data.
@@ -91,6 +93,8 @@ int main() {
           double py = j[1]["y"];
           double psi = j[1]["psi"];
           double v = j[1]["speed"];
+          double delta = j[1]["steering_angle"];
+          double a = j[1]["throttle"];
 
           /*
           * TODO: Calculate steering angle and throttle using MPC.
@@ -98,18 +102,77 @@ int main() {
           * Both are in between [-1, 1].
           *
           */
-          double steer_value;
-          double throttle_value;
+          cout << endl;
+
+          const double Lf = 2.67;
+
+          // Translate ptsx, ptsy to car coords
+          for (unsigned int i = 0; i < ptsx.size(); i++) {
+            double dtx = ptsx[i] - px;
+            double dty = ptsy[i] - py;
+            ptsx[i] = dtx * cos(psi) + dty * sin(psi);
+            ptsy[i] = dty * cos(psi) - dtx * sin(psi);
+          }
+          Eigen::VectorXd ptsx_car_frame = Eigen::VectorXd::Map(ptsx.data(), ptsx.size());
+          Eigen::VectorXd ptsy_car_frame = Eigen::VectorXd::Map(ptsy.data(), ptsy.size());
+
+          // Fit reference trajactory coeffs
+          auto coeffs = polyfit(ptsx_car_frame, ptsy_car_frame, 3);
+          cout << "coeffs:" << endl << coeffs << endl;
+
+          // Consider actuator delay of 100ms/0.1s, so project car's current trajectory by another 100ms.
+          double delay = 0.1;
+
+          // Before state projection during the delay. Everything in car frame so x = y = psi = 0
+          const double x0 = 0;
+          const double y0 = 0;
+          const double psi0 = 0;
+          const double cte0 = polyeval(coeffs, 0) - 0;
+          const double epsi0 = 0 - atan(coeffs[1]);
+
+          // Projected the states after delay
+          double x_aft_delay = x0 + (v * cos(psi0) * delay);
+          double y_aft_delay = y0 + (v * sin(psi0) * delay);
+          double psi_aft_delay =
+              psi0 + (v * (-delta) * delay / Lf); // delta from simulator is opposite than that in mpc
+          double v_aft_delay = v + a * delay;
+          double cte_aft_delay = cte0 + (v * sin(epsi0) * delay);
+          double epsi_aft_delay = epsi0 + psi_aft_delay;
+
+          // Init state for MPC
+          Eigen::VectorXd state(6);
+          // state << 0, 0, 0, v, cte, epsi;
+          // Use states after delay
+          state << x_aft_delay, y_aft_delay, psi_aft_delay, v_aft_delay, cte_aft_delay, epsi_aft_delay;
+          cout << "init state for mpc:" << endl << state << endl;
+
+          // Run MPC
+          auto result = mpc.Solve(state, coeffs);
 
           json msgJson;
           // NOTE: Remember to divide by deg2rad(25) before you send the steering value back.
           // Otherwise the values will be in between [-deg2rad(25), deg2rad(25] instead of [-1, 1].
-          msgJson["steering_angle"] = steer_value;
-          msgJson["throttle"] = throttle_value;
 
-          //Display the MPC predicted trajectory 
+          // The direction of steering from mpc result is opposite than the simulator, so multiply it by -1.
+          // We also need to map the [-1, 1] steering back to [-25deg, 25deg] for the simulator.
+          msgJson["steering_angle"] = -result[0] / deg2rad(25);
+          msgJson["throttle"] = result[1];
+          cout << "to simulator: " <<
+               "steering angle:" << msgJson["steering_angle"] << " " <<
+               "throttle:" << msgJson["throttle"] << endl;
+
+          // Display the MPC predicted trajectory
           vector<double> mpc_x_vals;
           vector<double> mpc_y_vals;
+
+          // Pull predicted trajectory from mpc result
+          for (int i = 2; i < result.size(); i++) {
+            if (i % 2 == 0) {
+              mpc_x_vals.push_back(result[i]);
+            } else {
+              mpc_y_vals.push_back(result[i]);
+            }
+          }
 
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Green line
@@ -117,9 +180,14 @@ int main() {
           msgJson["mpc_x"] = mpc_x_vals;
           msgJson["mpc_y"] = mpc_y_vals;
 
-          //Display the waypoints/reference line
+          cout << "mpc_x:" << msgJson["mpc_x"] << endl;
+
+          // Display the waypoints/reference line
           vector<double> next_x_vals;
           vector<double> next_y_vals;
+
+          next_x_vals = ptsx;
+          next_y_vals = ptsy;
 
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Yellow line
@@ -127,9 +195,10 @@ int main() {
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
 
+          cout << "next_x:" << msgJson["next_x"] << endl;
 
           auto msg = "42[\"steer\"," + msgJson.dump() + "]";
-          std::cout << msg << std::endl;
+          // std::cout << msg << std::endl;
           // Latency
           // The purpose is to mimic real driving conditions where
           // the car does actuate the commands instantly.
